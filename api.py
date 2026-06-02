@@ -8,6 +8,7 @@ Start: uvicorn api:app --host 0.0.0.0 --port 8125 --reload
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from db import get_db, DB_PATH
+from datetime import date as _date
 import os
 
 app = FastAPI(
@@ -37,6 +38,31 @@ def _mp_url(member_id: int) -> str:
 
 def _mp_votes_url(member_id: int) -> str:
     return f"https://members.parliament.uk/member/{member_id}/voting"
+
+
+def _time_since(date_str: str | None) -> str:
+    if not date_str:
+        return "unknown"
+    try:
+        then = _date.fromisoformat(date_str[:10])
+    except ValueError:
+        return "unknown"
+    days = (_date.today() - then).days
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 7:
+        return f"{days} days ago"
+    if days < 14:
+        return "1 week ago"
+    if days < 60:
+        return f"{days // 7} weeks ago"
+    if days < 365:
+        months = days // 30
+        return f"{months} month{'s' if months != 1 else ''} ago"
+    years = days // 365
+    return f"{years} year{'s' if years != 1 else ''} ago"
 
 
 def _enrich_division(d: dict) -> dict:
@@ -155,6 +181,7 @@ def index():
     <div class="ep"><span class="method get">GET</span><span class="path">/api/mps/{{id}}</span><span class="desc">Single MP profile with aye/no summary</span></div>
     <div class="ep"><span class="method get">GET</span><span class="path">/api/mps/{{id}}/recent</span><span class="desc">Most recent votes for one MP <span class="badge badge-blue">?limit=10</span></span></div>
     <div class="ep"><span class="method get">GET</span><a class="path" href="/api/mps/all/recent">/api/mps/all/recent</a><span class="desc">Latest N votes for every MP in one response</span></div>
+    <div class="ep"><span class="method get">GET</span><a class="path" href="/api/mps/activity">/api/mps/activity</a><span class="desc">Last vote date and time since last vote for every tracked MP, sorted by most recent</span></div>
     <div class="ep"><span class="method get">GET</span><span class="path">/api/mps/{{id}}/votes</span><span class="desc">Full vote history with filters: <code>?voted=aye|no|abstain</code> <code>?working_class_impact=hurts</code> <code>?q=search</code></span></div>
   </div>
 
@@ -178,6 +205,7 @@ def index():
     <div class="ep"><span class="method get">GET</span><a class="path" href="/api/sentiment/overview">/api/sentiment/overview</a><span class="desc">Cross-impact summary — most harmful and most beneficial divisions for working class and business</span></div>
     <div class="ep"><span class="method get">GET</span><a class="path" href="/api/sentiment/working-class?impact=hurts">/api/sentiment/working-class</a><span class="desc">Divisions filtered by working class impact <span class="badge badge-purple">?impact=helps|hurts|neutral|mixed</span></span></div>
     <div class="ep"><span class="method get">GET</span><a class="path" href="/api/sentiment/business?impact=helps">/api/sentiment/business</a><span class="desc">Divisions filtered by business impact <span class="badge badge-purple">?impact=helps|hurts|neutral|mixed</span></span></div>
+    <div class="ep"><span class="method get">GET</span><a class="path" href="/api/sentiment/women-children?impact=hurts">/api/sentiment/women-children</a><span class="desc">Divisions filtered by women &amp; children impact <span class="badge badge-purple">?impact=helps|hurts|neutral|mixed</span></span></div>
   </div>
 
   <h2>Search &amp; Stats</h2>
@@ -377,6 +405,15 @@ def votes_browser():
     <button class="chip" data-biz="neutral">➖ Neutral</button>
   </div>
 
+  <div class="filters">
+    <span style="font-size:.75rem;color:var(--muted);align-self:center">Women &amp; children:</span>
+    <button class="chip active" data-wch="">All</button>
+    <button class="chip" data-wch="helps">✅ Protects</button>
+    <button class="chip" data-wch="hurts">❌ Harms</button>
+    <button class="chip" data-wch="mixed">⚠️ Mixed</button>
+    <button class="chip" data-wch="neutral">➖ Neutral</button>
+  </div>
+
   <select class="sort-select" id="sort">
     <option value="recent">Most recent</option>
     <option value="analysed">AI analysed first</option>
@@ -393,7 +430,7 @@ def votes_browser():
 const PAGE = 25;
 let skip = 0, total = 0;
 let searchTimer = null;
-let activeWC = '', activeBiz = '';
+let activeWC = '', activeBiz = '', activeWCh = '';
 
 // ── Fetch & render ──────────────────────────────────────────────────────────
 async function load() {
@@ -403,9 +440,10 @@ async function load() {
   const params = new URLSearchParams({
     limit: PAGE,
     skip,
-    ...(q         && { q }),
-    ...(activeWC  && { working_class_impact: activeWC }),
-    ...(activeBiz && { business_impact: activeBiz }),
+    ...(q          && { q }),
+    ...(activeWC   && { working_class_impact: activeWC }),
+    ...(activeBiz  && { business_impact: activeBiz }),
+    ...(activeWCh  && { women_children_impact: activeWCh }),
   });
 
   document.getElementById('grid').innerHTML =
@@ -464,6 +502,11 @@ function renderCards(divs) {
               <h4>Business impact</h4>
               <div class="impact-val ${impactClass(d.business_impact)}">${impactLabel(d.business_impact)}</div>
               <div class="impact-reason">${esc(d.business_reason || '')}</div>
+            </div>
+            <div class="impact-box">
+              <h4>Women &amp; children</h4>
+              <div class="impact-val ${impactClass(d.women_children_impact)}">${impactLabel(d.women_children_impact)}</div>
+              <div class="impact-reason">${esc(d.women_children_reason || '')}</div>
             </div>
           </div>
           ${d.public_impact ? `
@@ -595,6 +638,16 @@ document.querySelectorAll('[data-biz]').forEach(btn => {
   });
 });
 
+// Women & children filter chips
+document.querySelectorAll('[data-wch]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('[data-wch]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    activeWCh = btn.dataset.wch;
+    skip = 0; load();
+  });
+});
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 load();
 </script>
@@ -606,6 +659,29 @@ load();
 # MPs
 # ---------------------------------------------------------------------------
 
+@app.get("/api/mps/activity", summary="Last vote date and time since for every MP", tags=["MPs"])
+def mps_activity():
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT m.member_id, m.name, m.party, m.constituency,
+                   MAX(d.date) AS last_vote_date,
+                   COUNT(v.division_id) AS total_votes,
+                   SUM(v.voted_aye) AS aye_votes,
+                   SUM(v.voted_no) AS no_votes
+            FROM mps m
+            LEFT JOIN mp_votes v USING(member_id)
+            LEFT JOIN divisions d USING(division_id)
+            GROUP BY m.member_id
+            ORDER BY last_vote_date DESC NULLS LAST
+        """).fetchall()
+    result = []
+    for r in rows:
+        mp = _enrich_mp(dict(r))
+        mp["last_vote_time_since"] = _time_since(mp.get("last_vote_date"))
+        result.append(mp)
+    return result
+
+
 @app.get("/api/mps", summary="List all tracked MPs", tags=["MPs"])
 def list_mps(
     party: str | None = Query(None, description="Filter: 'Reform UK' or 'Restore Britain'"),
@@ -616,10 +692,14 @@ def list_mps(
         result = []
         for r in conn.execute(sql, params).fetchall():
             mp = _enrich_mp(dict(r))
-            mp["vote_stats"] = _row(conn.execute("""
-                SELECT COUNT(*) AS total_votes, SUM(voted_aye) AS aye_votes, SUM(voted_no) AS no_votes
-                FROM mp_votes WHERE member_id = ?
+            stats = _row(conn.execute("""
+                SELECT COUNT(*) AS total_votes, SUM(voted_aye) AS aye_votes, SUM(voted_no) AS no_votes,
+                       MAX(d.date) AS last_vote_date
+                FROM mp_votes v JOIN divisions d USING(division_id)
+                WHERE v.member_id = ?
             """, (mp["member_id"],)).fetchone())
+            stats["last_vote_time_since"] = _time_since(stats.get("last_vote_date"))
+            mp["vote_stats"] = stats
             result.append(mp)
     return result
 
@@ -631,10 +711,14 @@ def get_mp(member_id: int):
         if not mp:
             raise HTTPException(404, "MP not found")
         mp = _enrich_mp(mp)
-        mp["vote_stats"] = _row(conn.execute("""
-            SELECT COUNT(*) AS total_votes, SUM(voted_aye) AS aye_votes, SUM(voted_no) AS no_votes
-            FROM mp_votes WHERE member_id = ?
+        stats = _row(conn.execute("""
+            SELECT COUNT(*) AS total_votes, SUM(voted_aye) AS aye_votes, SUM(voted_no) AS no_votes,
+                   MAX(d.date) AS last_vote_date
+            FROM mp_votes v JOIN divisions d USING(division_id)
+            WHERE v.member_id = ?
         """, (member_id,)).fetchone())
+        stats["last_vote_time_since"] = _time_since(stats.get("last_vote_date"))
+        mp["vote_stats"] = stats
     return mp
 
 
@@ -702,8 +786,9 @@ def list_divisions(
     q:     str | None = Query(None, description="Search title or AI explanation"),
     from_date: str | None = Query(None, description="YYYY-MM-DD"),
     to_date:   str | None = Query(None, description="YYYY-MM-DD"),
-    working_class_impact: str | None = Query(None),
-    business_impact:      str | None = Query(None),
+    working_class_impact:  str | None = Query(None),
+    business_impact:       str | None = Query(None),
+    women_children_impact: str | None = Query(None),
     bill_id: int | None = Query(None, description="Filter to a specific bill"),
     skip:  int = Query(0,  ge=0),
     limit: int = Query(50, ge=1, le=200),
@@ -720,6 +805,8 @@ def list_divisions(
         filters.append("d.working_class_impact = ?"); params.append(working_class_impact)
     if business_impact:
         filters.append("d.business_impact = ?"); params.append(business_impact)
+    if women_children_impact:
+        filters.append("d.women_children_impact = ?"); params.append(women_children_impact)
     if bill_id:
         filters.append("db.bill_id = ?"); params.append(bill_id)
 
@@ -733,7 +820,7 @@ def list_divisions(
         rows = conn.execute(f"""
             SELECT d.division_id, d.date, d.title, d.aye_count, d.no_count,
                    d.plain_explanation, d.working_class_impact, d.business_impact,
-                   d.impact_summary, d.analyzed,
+                   d.women_children_impact, d.impact_summary, d.analyzed,
                    b.bill_id, b.short_title AS bill_short_title, b.current_stage AS bill_stage
             FROM divisions d
             LEFT JOIN division_bills db ON db.division_id = d.division_id
@@ -1158,6 +1245,57 @@ def business_sentiment(
     }
 
 
+@app.get("/api/sentiment/women-children", summary="Divisions by women and children impact", tags=["Sentiment"])
+def women_children_sentiment(
+    impact: str = Query(..., description="helps | hurts | neutral | mixed"),
+    skip:   int = Query(0, ge=0),
+    limit:  int = Query(50, ge=1, le=200),
+):
+    valid = {"helps", "hurts", "neutral", "mixed"}
+    if impact not in valid:
+        raise HTTPException(400, f"impact must be one of: {', '.join(sorted(valid))}")
+
+    with get_db() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM divisions WHERE women_children_impact = ?", (impact,)
+        ).fetchone()[0]
+        rows = conn.execute("""
+            SELECT d.division_id, d.date, d.title, d.aye_count, d.no_count,
+                   d.plain_explanation, d.women_children_impact, d.women_children_reason,
+                   d.working_class_impact, d.business_impact, d.impact_summary,
+                   b.bill_id, b.short_title AS bill_short_title
+            FROM divisions d
+            LEFT JOIN division_bills db ON db.division_id = d.division_id
+            LEFT JOIN bills b ON b.bill_id = db.bill_id
+            WHERE d.women_children_impact = ?
+            ORDER BY d.date DESC
+            LIMIT ? OFFSET ?
+        """, (impact, limit, skip)).fetchall()
+
+        result = []
+        for row in rows:
+            d = dict(row)
+            d["mp_votes"] = _rows(conn.execute("""
+                SELECT m.name, m.party, v.voted_aye, v.voted_no
+                FROM mp_votes v JOIN mps m USING(member_id)
+                WHERE v.division_id = ?
+                ORDER BY m.name
+            """, (d["division_id"],)).fetchall())
+            result.append(d)
+
+    return {
+        "impact": impact,
+        "label": {
+            "helps":   "Protects / benefits women and children",
+            "hurts":   "Harms / fails to protect women and children",
+            "neutral": "Neutral for women and children",
+            "mixed":   "Mixed for women and children",
+        }[impact],
+        "total": total, "skip": skip, "limit": limit,
+        "divisions": result,
+    }
+
+
 @app.get("/api/sentiment/overview", summary="Cross-impact summary (working class vs business)", tags=["Sentiment"])
 def sentiment_overview():
     with get_db() as conn:
@@ -1216,9 +1354,36 @@ def sentiment_overview():
             ORDER BY d.date DESC LIMIT 5
         """).fetchall())
 
+        wc_breakdown = _rows(conn.execute("""
+            SELECT women_children_impact AS impact, COUNT(*) AS count
+            FROM divisions WHERE analyzed = 1 AND women_children_impact IS NOT NULL
+            GROUP BY women_children_impact ORDER BY count DESC
+        """).fetchall())
+
+        wc_harm = _rows(conn.execute("""
+            SELECT d.division_id, d.date, d.title, d.women_children_reason, d.impact_summary,
+                   b.short_title AS bill_short_title
+            FROM divisions d
+            LEFT JOIN division_bills db ON db.division_id = d.division_id
+            LEFT JOIN bills b ON b.bill_id = db.bill_id
+            WHERE d.women_children_impact = 'hurts'
+            ORDER BY d.date DESC LIMIT 5
+        """).fetchall())
+
+        wc_protect = _rows(conn.execute("""
+            SELECT d.division_id, d.date, d.title, d.women_children_reason, d.impact_summary,
+                   b.short_title AS bill_short_title
+            FROM divisions d
+            LEFT JOIN division_bills db ON db.division_id = d.division_id
+            LEFT JOIN bills b ON b.bill_id = db.bill_id
+            WHERE d.women_children_impact = 'helps'
+            ORDER BY d.date DESC LIMIT 5
+        """).fetchall())
+
     return {
-        "working_class": {"breakdown": wc, "recent_harmful": wc_worst, "recent_beneficial": wc_best},
-        "business":      {"breakdown": biz, "recent_pro":     biz_best, "recent_anti":      biz_worst},
+        "working_class":   {"breakdown": wc,           "recent_harmful":    wc_worst,   "recent_beneficial": wc_best},
+        "business":        {"breakdown": biz,           "recent_pro":        biz_best,   "recent_anti":       biz_worst},
+        "women_children":  {"breakdown": wc_breakdown,  "recent_harmful":    wc_harm,    "recent_protective": wc_protect},
     }
 
 

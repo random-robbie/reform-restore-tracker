@@ -13,7 +13,7 @@ import argparse
 
 from db import init_db, get_db
 from parliament import get_all_mps, get_member_votes
-from llm import analyse_division
+from llm import analyse_division, patch_women_children
 
 
 def upsert_mp(conn, mp: dict):
@@ -179,6 +179,8 @@ def run_analysis():
                         working_class_reason = :working_class_reason,
                         business_impact      = :business_impact,
                         business_reason      = :business_reason,
+                        women_children_impact = :women_children_impact,
+                        women_children_reason = :women_children_reason,
                         public_impact        = :public_impact,
                         impact_summary       = :impact_summary,
                         analyzed             = 1
@@ -192,15 +194,56 @@ def run_analysis():
     print("Analysis complete")
 
 
+def run_patch_women_children():
+    """Back-fill women_children fields on already-analysed divisions that are missing them."""
+    print("\n=== Patching women/children impact on analysed divisions ===")
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT division_id, title, date, aye_count, no_count
+            FROM divisions
+            WHERE analyzed = 1 AND women_children_impact IS NULL
+            ORDER BY date DESC
+        """).fetchall()
+
+    total = len(rows)
+    print(f"  {total} divisions to patch")
+
+    for i, row in enumerate(rows, 1):
+        did   = row["division_id"]
+        title = row["title"]
+        print(f"  [{i}/{total}] {title[:70]} ...", end=" ", flush=True)
+        try:
+            result = patch_women_children(
+                title=title,
+                date=row["date"] or "",
+                aye_count=row["aye_count"] or 0,
+                no_count=row["no_count"]  or 0,
+            )
+            with get_db() as conn:
+                conn.execute("""
+                    UPDATE divisions SET
+                        women_children_impact = :women_children_impact,
+                        women_children_reason = :women_children_reason
+                    WHERE division_id = :did
+                """, {**result, "did": did})
+            print("done")
+        except Exception as exc:
+            print(f"ERROR: {exc}")
+        time.sleep(0.5)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-llm",  action="store_true", help="Skip LLM analysis")
     parser.add_argument("--analyse", action="store_true", help="Only run LLM on unanalysed rows")
+    parser.add_argument("--patch",   action="store_true", help="Back-fill women/children impact on already-analysed rows")
     args = parser.parse_args()
 
     init_db()
 
-    if args.analyse:
+    if args.patch:
+        run_patch_women_children()
+    elif args.analyse:
         run_analysis()
     else:
         fetch_all(skip_llm=args.no_llm)

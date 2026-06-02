@@ -1,8 +1,36 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
-.env
-*.log
-.DS_Store
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
 venv/
 .venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+*.key
+secrets.json
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# SQLite WAL/SHM temp files (keep reform.db itself)
+*.db-wal
+*.db-shm

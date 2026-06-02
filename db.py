@@ -26,14 +26,16 @@ CREATE TABLE IF NOT EXISTS divisions (
     evel_type        TEXT,
     evel_country     TEXT,
     -- LLM analysis
-    plain_explanation   TEXT,
-    working_class_impact TEXT,
-    working_class_reason TEXT,
-    business_impact      TEXT,
-    business_reason      TEXT,
-    public_impact        TEXT,
-    impact_summary       TEXT,
-    analyzed             INTEGER DEFAULT 0,
+    plain_explanation      TEXT,
+    working_class_impact   TEXT,
+    working_class_reason   TEXT,
+    business_impact        TEXT,
+    business_reason        TEXT,
+    women_children_impact  TEXT,
+    women_children_reason  TEXT,
+    public_impact          TEXT,
+    impact_summary         TEXT,
+    analyzed               INTEGER DEFAULT 0,
     created_at           TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
