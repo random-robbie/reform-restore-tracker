@@ -10,6 +10,8 @@ services:
       - .:/data
     environment:
       REFORM_DB: /data/reform.db
+      ENABLE_CRON: "1"
+      TZ: Europe/London
     networks:
       - my-docker
 

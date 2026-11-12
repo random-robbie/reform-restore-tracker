@@ -1,0 +1,2 @@
+# Nightly vote sync inside the reform container (07:00 Europe/London)
+0 7 * * * root /bin/sh /app/sync-all.sh >> /data/sync.log 2>&1

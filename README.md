@@ -34,8 +34,8 @@ Track every parliamentary vote cast by **Reform UK** and **Restore Britain** MPs
 |-----------|-----------|
 | Data store | SQLite (`reform.db`) |
 | API | FastAPI + Uvicorn (port 8125) |
-| LLM analysis | Local vLLM — MiniMax M2.7 |
-| Scheduling | macOS launchd (daily at 07:00) |
+| LLM analysis | Local vLLM (`http://192.168.1.80:18080/v1`, model auto-discovered; currently `Qwen/Qwen3.8-Flash-Next`, thinking disabled) |
+| Scheduling | cron in the container (07:00 Europe/London) + macOS launchd on the Mac mini |
 | Hosting | Render free tier (Docker) |
 | Deployment | git push → auto-deploy |
 
@@ -125,9 +125,21 @@ division_bills  — division_id ↔ bill_id (junction)
 
 ---
 
+## Running with Docker (self-hosted)
+
+```bash
+docker compose up -d --build
+```
+
+The compose file mounts the repo directory at `/data` and sets `REFORM_DB=/data/reform.db`, `ENABLE_CRON=1`, `TZ=Europe/London`. The container runs cron, which fires `sync-all.sh` daily at 07:00 (fetch → analyse → bill links) and appends to `sync.log`.
+
+Do **not** switch back to a file bind-mount (`./reform.db:/app/reform.db`): the daily rsync replaces the file by rename, and a pinned file mount keeps serving the detached old inode, so analyses silently land in a deleted file.
+
+---
+
 ## Daily sync (macOS)
 
-`sync.sh` runs the full pipeline: fetch → analyse → bills → git commit + push → Render redeploys.
+`sync.sh` runs the full pipeline: fetch → analyse → bills → git commit + push → Render redeploys, then rsyncs the DB to the Docker host.
 
 The included launchd plist fires it at 07:00 daily:
 
