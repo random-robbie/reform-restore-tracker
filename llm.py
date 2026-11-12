@@ -2,15 +2,32 @@ import re
 import json
 import requests
 
-LLM_BASE_URL = "http://192.168.1.231:8000/v1"
-LLM_MODEL    = "minimax-m2.7"
-BILLS_API    = "https://bills-api.parliament.uk/api/v1/Bills"
+LLM_BASE_URL = "http://192.168.1.80:18080/v1"
 
 _bill_cache: dict[str, str] = {}
 
 VALID_IMPACT = {"helps", "hurts", "neutral", "mixed"}
 
 SYSTEM = "Think briefly. Output JSON only. No extra text."
+
+_model_cache: str | None = None
+
+
+def _model() -> str:
+    """First model advertised by the vLLM endpoint's /v1/models (checked once per process)."""
+    global _model_cache
+    if _model_cache:
+        return _model_cache
+    r = requests.get(f"{LLM_BASE_URL}/models", timeout=15)
+    r.raise_for_status()
+    models = r.json().get("data", [])
+    if not models:
+        raise RuntimeError(f"No models available at {LLM_BASE_URL}/models")
+    _model_cache = models[0]["id"]
+    print(f"[llm] using model {_model_cache} at {LLM_BASE_URL}")
+    return _model_cache
+
+BILLS_API    = "https://bills-api.parliament.uk/api/v1/Bills"
 
 USER_TMPL = """UK Parliament vote: {title}
 {context_line}Result: Ayes {aye_count} Noes {no_count} {result}
@@ -63,15 +80,16 @@ def analyse_division(title: str, date: str, aye_count: int, no_count: int) -> di
     )
 
     payload = {
-        "model":       LLM_MODEL,
+        "model":       _model(),
         "messages":    [
             {"role": "system", "content": SYSTEM},
             {"role": "user",   "content": user_msg},
         ],
         "temperature": 0.1,
         "max_tokens":  8192,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
-    resp = requests.post(f"{LLM_BASE_URL}/chat/completions", json=payload, timeout=120)
+    resp = requests.post(f"{LLM_BASE_URL}/chat/completions", json=payload, timeout=600)
     resp.raise_for_status()
     raw  = resp.json()["choices"][0]["message"]["content"] or ""
 
@@ -112,15 +130,16 @@ def patch_women_children(title: str, date: str, aye_count: int, no_count: int) -
         aye_count=aye_count, no_count=no_count, result=result,
     )
     payload = {
-        "model":       LLM_MODEL,
+        "model":       _model(),
         "messages":    [
             {"role": "system", "content": SYSTEM},
             {"role": "user",   "content": user_msg},
         ],
         "temperature": 0.1,
         "max_tokens":  4096,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
-    resp = requests.post(f"{LLM_BASE_URL}/chat/completions", json=payload, timeout=120)
+    resp = requests.post(f"{LLM_BASE_URL}/chat/completions", json=payload, timeout=600)
     resp.raise_for_status()
     raw  = resp.json()["choices"][0]["message"]["content"] or ""
     text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()

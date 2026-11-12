@@ -201,7 +201,7 @@ def run_patch_women_children():
         rows = conn.execute("""
             SELECT division_id, title, date, aye_count, no_count
             FROM divisions
-            WHERE analyzed = 1 AND women_children_impact IS NULL
+            WHERE analyzed = 1 AND (women_children_impact IS NULL OR women_children_impact = '' OR women_children_reason IS NULL OR women_children_reason = '')
             ORDER BY date DESC
         """).fetchall()
 

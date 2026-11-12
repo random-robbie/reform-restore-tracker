@@ -1,0 +1,19 @@
+services:
+  reform:
+    build: .
+    container_name: reform
+    hostname: reform
+    restart: always
+    volumes:
+      # directory mount, not file mount: the daily rsync renames a temp file over
+      # reform.db, which a pinned file bind-mount would not follow
+      - .:/data
+    environment:
+      REFORM_DB: /data/reform.db
+    networks:
+      - my-docker
+
+networks:
+  my-docker:
+    external: true
+    name: docker_my-docker

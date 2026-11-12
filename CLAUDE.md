@@ -6,7 +6,7 @@ A tool that tracks every parliamentary vote by Reform UK (party ID 1036) and Res
 ## Stack
 - **Data**: SQLite at `~/tools/reform/reform.db` (committed to git, deployed via Docker)
 - **API**: FastAPI on port 8125 (`api.py`) — serves both JSON endpoints and HTML frontends
-- **LLM**: Local vLLM at `http://192.168.1.231:8000/v1` running `minimax-m2.7` (reasoning model — always outputs `<think>...</think>` before JSON)
+- **LLM**: Local vLLM at `http://192.168.1.80:18080/v1` — model name auto-discovered from `/v1/models` (currently `Qwen/Qwen3.8-Flash-Next`); requests pass `chat_template_kwargs: {"enable_thinking": False}` (reasoning model — always outputs `<think>...</think>` before JSON)
 - **Hosting**: Render free tier (Docker), auto-deploys on every push to `main`
 - **Scheduler**: macOS launchd plist at `~/Library/LaunchAgents/uk.parliament.reform-sync.plist` — runs `sync.sh` daily at 07:00
 
@@ -34,8 +34,8 @@ A tool that tracks every parliamentary vote by Reform UK (party ID 1036) and Res
 - MP votes: `https://members.parliament.uk/member/{id}/voting`
 
 ## LLM gotchas
-- MiniMax M2.7 always starts with `<think>...</think>` — strip with `re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)`
-- Use `max_tokens=8192` — think block alone is ~700 tokens
+- With `enable_thinking: false` the model emits JSON directly (~8s/division); the reasoning-block stripping regex stays as a fallback for thinking-enabled calls
+- Request timeout must exceed real latency — one analysis is ~8s with thinking disabled, but server calls occasionally stall; use `timeout=600` on `chat/completions`
 - System prompt must include: _"Think briefly. Output JSON only. No extra text."_ and _"Analyse votes purely from the bill title and result — you do not need external knowledge of the date. Always produce your analysis regardless of when the vote took place."_
 - `guided_json` vLLM param doesn't enforce key names — use explicit JSON template in user message instead
 
@@ -70,6 +70,8 @@ git commit -m "sync: $(date '+%Y-%m-%d')"
 git push origin main
 # Render auto-deploys the Docker image — DB is baked in at build time
 ```
+
+Self-hosted Docker host: the compose file mounts the whole directory at `/data` and sets `REFORM_DB=/data/reform.db` (read by `db.py`). Do **not** go back to a file bind-mount `./reform.db:/app/reform.db` — the daily rsync replaces the file by rename, and a pinned file mount keeps serving the detached old inode (analyses then silently land in a deleted file).
 
 ## API endpoints
 | Endpoint | Description |

@@ -36,4 +36,8 @@ else
     echo "Pushed — Render will auto-deploy" | tee -a "$LOG"
 fi
 
+# 5. Push updated DB to self-hosted Docker server
+echo "[4/4] Syncing DB to Docker server..." | tee -a "$LOG"
+rsync -az reform.db docker:~/docker/reform/reform.db 2>&1 | tee -a "$LOG"
+
 echo "Done." | tee -a "$LOG"

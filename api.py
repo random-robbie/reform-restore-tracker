@@ -177,7 +177,9 @@ def index():
 
   <h2>MPs</h2>
   <div class="endpoints">
-    <div class="ep"><span class="method get">GET</span><a class="path" href="/api/mps">/api/mps</a><span class="desc">List all tracked MPs with vote totals. Filter with <code>?party=Reform UK</code></span></div>
+    <div class="ep"><span class="method get"><a class="path" href="/api/mps/stats">/api/mps/stats</a></span><span class="desc">Per-MP scoreboard — opportunities vs votes cast, and how often each MP's vote sided with the AI impact verdict (helped vs hurt people)</span></div>
+    <div class="ep"><span class="method get"><a class="path" href="/mps">/mps</a></span><span class="desc">MP scoreboard UI — sort by participation, helped or hurt counts</span></div>
+    <div class="ep"><span class="method get"><a class="path" href="/api/mps">/api/mps</a></span><span class="desc">List all tracked MPs with vote totals. Filter with <code>?party=Reform UK</code></span></div>
     <div class="ep"><span class="method get">GET</span><span class="path">/api/mps/{{id}}</span><span class="desc">Single MP profile with aye/no summary</span></div>
     <div class="ep"><span class="method get">GET</span><span class="path">/api/mps/{{id}}/recent</span><span class="desc">Most recent votes for one MP <span class="badge badge-blue">?limit=10</span></span></div>
     <div class="ep"><span class="method get">GET</span><a class="path" href="/api/mps/all/recent">/api/mps/all/recent</a><span class="desc">Latest N votes for every MP in one response</span></div>
@@ -339,6 +341,8 @@ def votes_browser():
     .mp-aye { background: #14532d; color: #86efac; }
     .mp-no  { background: #450a0a; color: #fca5a5; }
     .mp-abs { background: #1c1917; color: var(--muted); }
+    .verdict { font-size: .72rem; margin-left: .15rem; }
+    .verdict-help { } /* emoji colors itself */
 
     .ext-links { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .9rem; }
     .ext-link { display: inline-flex; align-items: center; gap: .35rem; font-size: .78rem;
@@ -377,6 +381,7 @@ def votes_browser():
   <h1>⚖️ Reform UK &amp; Restore Britain — Votes Browser</h1>
   <nav>
     <a href="/">Home</a>
+    <a href="/mps">MPs</a>
     <a href="/docs">API Docs</a>
   </nav>
 </header>
@@ -570,9 +575,30 @@ async function toggle(id) {
           const cls = v.voted_aye ? 'mp-aye' : v.voted_no ? 'mp-no' : 'mp-abs';
           const profileUrl = v.parliament_url || `https://members.parliament.uk/member/${v.member_id}`;
           const votingUrl  = v.parliament_votes_url || `https://members.parliament.uk/member/${v.member_id}/voting`;
+          // Did this vote line up with the AI impact verdict? AYE helps when the
+          // division's impact is "helps"; NO helps when the impact is "hurts".
+          const sides = d.impact_sides || {};
+          let verdict = '';
+          const relevant = ['working_class_impact','business_impact','women_children_impact'].filter(k => sides[k]);
+          if (relevant.length && (v.voted_aye || v.voted_no)) {
+            const voted = v.voted_aye ? 'aye' : 'no';
+            const opposite = voted === 'aye' ? 'no' : 'aye';
+            // For each AI impact verdict on this division: did this vote side with
+            // the people (that impact's helping side) or against them?
+            const helpedCount = relevant.filter(k => sides[k] === voted).length;
+            const hurtCount   = relevant.filter(k => sides[k] === opposite).length;
+            if (helpedCount > hurtCount && helpedCount > 0) {
+              verdict = '<span class="verdict verdict-help" title="Voted to help people (per AI impact)">👍</span>';
+            } else if (hurtCount > helpedCount && hurtCount > 0) {
+              verdict = '<span class="verdict verdict-hurt" title="Voted to hurt people (per AI impact)">👎</span>';
+            } else if (helpedCount === hurtCount && helpedCount > 0) {
+              verdict = '<span class="verdict" title="Split verdict: helped on some impacts, hurt on others">⚖️</span>';
+            }
+          }
           return `<span class="mp-tag ${cls}" title="${esc(v.constituency || '')}">
             <a href="${profileUrl}" target="_blank" rel="noopener" title="MP profile">${esc(v.name)}</a>
             ${voteLabel}
+            ${verdict}
             <a href="${votingUrl}" target="_blank" rel="noopener" title="Full voting record" style="opacity:.7;font-size:.7rem">⧉</a>
           </span>`;
         }).join('');
@@ -658,6 +684,65 @@ load();
 # ---------------------------------------------------------------------------
 # MPs
 # ---------------------------------------------------------------------------
+
+@app.get("/api/mps/stats", summary="Per-MP vote participation and sided counts", tags=["MPs"])
+def mps_stats():
+    """For every tracked MP: divisions tracked, how many they voted in,
+    and — on AI-analysed divisions — how often their vote lined up with the
+    impact verdict (helping people) vs against it (hurting people)."""
+    with get_db() as conn:
+        rows = conn.execute("""
+            SELECT m.member_id, m.name, m.party, m.constituency,
+                   (SELECT COUNT(*) FROM divisions) AS total_divisions,
+                   COUNT(v.division_id)             AS voted_count,
+                   SUM(v.voted_aye)                 AS aye_votes,
+                   SUM(v.voted_no)                  AS no_votes,
+                   SUM(CASE WHEN v.voted_aye = 0 AND v.voted_no = 0 THEN 1 ELSE 0 END) AS abstain_count,
+                   MAX(d.date)                      AS last_vote_date,
+                   SUM(CASE WHEN d.analyzed = 1 THEN 1 ELSE 0 END) AS analysed_opportunity,
+                   SUM(CASE WHEN d.analyzed = 1 AND (
+                        (v.voted_aye = 1 AND d.working_class_impact = 'helps') OR
+                        (v.voted_no  = 1 AND d.working_class_impact = 'hurts') OR
+                        (v.voted_aye = 1 AND d.business_impact       = 'helps') OR
+                        (v.voted_no  = 1 AND d.business_impact       = 'hurts') OR
+                        (v.voted_aye = 1 AND d.women_children_impact = 'helps') OR
+                        (v.voted_no  = 1 AND d.women_children_impact = 'hurts')
+                    ) THEN 1 ELSE 0 END) AS help_votes,
+                   SUM(CASE WHEN d.analyzed = 1 AND (
+                        (v.voted_aye = 1 AND d.working_class_impact = 'hurts') OR
+                        (v.voted_no  = 1 AND d.working_class_impact = 'helps') OR
+                        (v.voted_aye = 1 AND d.business_impact       = 'hurts') OR
+                        (v.voted_no  = 1 AND d.business_impact       = 'helps') OR
+                        (v.voted_aye = 1 AND d.women_children_impact = 'hurts') OR
+                        (v.voted_no  = 1 AND d.women_children_impact = 'helps')
+                    ) THEN 1 ELSE 0 END) AS hurt_votes,
+                   SUM(CASE WHEN d.analyzed = 1 AND v.voted_aye = 0 AND v.voted_no = 0
+                        THEN 1 ELSE 0 END) AS missed_analysed
+            FROM mps m
+            LEFT JOIN mp_votes v USING(member_id)
+            LEFT JOIN divisions d USING(division_id)
+            GROUP BY m.member_id
+            ORDER BY m.party, m.name
+        """).fetchall()
+    result = []
+    for r in rows:
+        mp = _enrich_mp(dict(r))
+        st = dict(r)
+        total_div = st.get("total_divisions") or 0
+        voted     = st.get("voted_count") or 0
+        opp       = st.get("analysed_opportunity") or 0
+        helps     = st.get("help_votes") or 0
+        hurts     = st.get("hurt_votes") or 0
+        mp["stats"] = {
+            **st,
+            "participation_pct":       round(voted / total_div * 100) if total_div else 0,
+            "voted_pct_of_analysed":   round(voted / opp * 100) if opp else 0,
+            "sided_net":               helps - hurts,
+            "help_pct":                round(helps / (helps + hurts) * 100) if (helps + hurts) else None,
+        }
+        result.append(mp)
+    return result
+
 
 @app.get("/api/mps/activity", summary="Last vote date and time since for every MP", tags=["MPs"])
 def mps_activity():
@@ -888,12 +973,29 @@ def get_division(division_id: int):
 
         div["mp_votes"] = [_enrich_mp(dict(v)) for v in conn.execute("""
             SELECT m.member_id, m.name, m.party, m.constituency,
-                   v.voted_aye, v.voted_no, v.was_teller
+                   v.voted_aye, v.voted_no, v.was_teller,
+                   CASE WHEN d.aye_count > d.no_count THEN 1 ELSE 0 END AS division_passed,
+                   v.voted_aye + v.voted_no AS voted
             FROM mp_votes v JOIN mps m USING(member_id)
+            CROSS JOIN (SELECT aye_count, no_count FROM divisions WHERE division_id = ?) d
             WHERE v.division_id = ?
             ORDER BY m.party, m.name
-        """, (division_id,)).fetchall()]
+        """, (division_id, division_id)).fetchall()]
         _enrich_division(div)
+
+        # Per-impact "did this division hurt people" verdicts for the MP list:
+        # sided_with_impact = whether the AYE side matches the side that HELPS people.
+        # The AYE side helps people when the division's impact is "helps" — so an MP
+        # voting Aye on a "hurts" division voted to hurt; voting No voted to protect.
+        impacts = {
+            k: div.get(k)
+            for k in ("working_class_impact", "business_impact", "women_children_impact")
+            if div.get(k)
+        }
+        div["impact_sides"] = {
+            k: ("aye" if v == "helps" else "no" if v == "hurts" else None)
+            for k, v in impacts.items()
+        }
     return div
 
 
@@ -1386,6 +1488,165 @@ def sentiment_overview():
         "women_children":  {"breakdown": wc_breakdown,  "recent_harmful":    wc_harm,    "recent_protective": wc_protect},
     }
 
+
+# ---------------------------------------------------------------------------
+# MPs scoreboard (HTML frontend)
+# ---------------------------------------------------------------------------
+
+@app.get("/mps", response_class=HTMLResponse, include_in_schema=False)
+def mps_page():
+    return HTMLResponse("""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MPs — Voting Record</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --bg:#0f1117; --surface:#161b27; --border:#1e293b; --text:#e2e8f0; --muted:#94a3b8; --accent:#4f46e5; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+    a { color: #60a5fa; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header { background: linear-gradient(135deg,#1e1b4b,#312e81); padding: 1.4rem 1.5rem;
+             border-bottom: 1px solid #4338ca; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .75rem; }
+    header h1 { font-size: 1.25rem; font-weight: 700; color: #fff; }
+    header nav a { font-size: .85rem; color: #a5b4fc; margin-left: 1rem; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 1.5rem; }
+    .legend { font-size: .8rem; color: var(--muted); margin-bottom: 1rem; line-height: 1.6; }
+    .legend b { color: var(--text); }
+    .tbl-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: .6rem; }
+    table { width: 100%; border-collapse: collapse; min-width: 900px; }
+    th { padding: .7rem .8rem; text-align: left; font-size: .72rem; text-transform: uppercase;
+         letter-spacing: .06em; color: var(--muted); border-bottom: 1px solid var(--border);
+         background: #131826; cursor: pointer; user-select: none; white-space: nowrap; }
+    th:hover { color: var(--text); }
+    td { padding: .65rem .8rem; border-bottom: 1px solid var(--border); font-size: .87rem; vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #1b2130; }
+    .mp-name { font-weight: 600; }
+    .party-badge { display: inline-block; padding: .1rem .55rem; border-radius: 9999px; font-size: .7rem; font-weight: 600; }
+    .party-reform  { background: #0e7490; color: #cffafe; }
+    .party-restore { background: #7c2d12; color: #fed7aa; }
+    .num { text-align: center; font-variant-numeric: tabular-nums; }
+    .frac { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .frac .den { color: var(--muted); }
+    .bar-cell { min-width: 140px; }
+    .mini-bar { height: 8px; border-radius: 4px; background: #1e293b; position: relative; overflow: hidden; }
+    .mini-bar .fill { position: absolute; inset: 0; }
+    .fill-help { background: linear-gradient(90deg,#16a34a,#22c55e); }
+    .fill-hurt { background: linear-gradient(90deg,#dc2626,#f87171); }
+    .tag-help { color: #4ade80; font-weight: 600; }
+    .tag-hurt { color: #f87171; font-weight: 600; }
+    .pct { color: var(--muted); font-size: .78rem; }
+    .empty { text-align: center; padding: 3rem; color: var(--muted); }
+    .loading { text-align: center; padding: 3rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+<header>
+  <h1>🧑‍⚖️ MP Voting Scoreboard</h1>
+  <nav><a href="/">Votes</a><a href="/mps">MPs</a><a href="/docs">API Docs</a></nav>
+</header>
+
+<div class="wrap">
+  <div class="legend">
+    <b>Opportunities</b> = every division tracked while the MP was in the database.
+    <b>Helped</b> = votes lining up with the AI impact verdict (Aye when the division Helps or No when it Hurts).
+    <b>Hurt</b> = votes against it (Aye when it Hurts or No when it Helps). Counts across working-class, business and women &amp; children verdicts.
+    Click a column to sort.
+  </div>
+  <div class="tbl-wrap">
+    <div id="loading" class="loading">Loading MP stats…</div>
+    <table id="tbl" style="display:none">
+      <thead><tr>
+        <th data-k="name">MP</th>
+        <th data-k="party">Party</th>
+        <th class="num" data-k="total_divisions">Opportunities</th>
+        <th class="num" data-k="voted_count">Voted</th>
+        <th class="num" data-k="participation_pct">Participation %</th>
+        <th class="num" data-k="help_votes" title="Voted with the 'helps' verdict">Helped ▲</th>
+        <th class="num" data-k="hurt_votes" title="Voted with the 'hurts' verdict">Hurt ▼</th>
+        <th data-k="help_pct">Help : Hurt</th>
+        <th class="bar-cell" data-k="sided_net">Net (help − hurt)</th>
+        <th class="num" data-k="last_vote_date">Last vote</th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let data = [], sortKey = 'sided_net', sortDir = -1;
+
+const partyCls = p => /restore/i.test(p) ? 'party-restore' : 'party-reform';
+const partyShort = p => /restore/i.test(p) ? 'Restore' : 'Reform UK';
+const fmtDate = s => s ? s.slice(0, 10) : '—';
+
+function render() {
+  const rows = [...data].sort((a, b) => {
+    const av = a.stats[sKey(a)] ?? '', bv = b.stats[sKey(b)] ?? '';
+    if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * sortDir;
+    return String(av).localeCompare(String(bv)) * sortDir;
+  });
+  const tb = document.getElementById('tbody');
+  tb.innerHTML = rows.map(m => {
+    const s = m.stats;
+    const helps = s.help_votes || 0, hurts = s.hurt_votes || 0;
+    const net = s.sided_net ?? (helps - hurts);
+    const total = helps + hurts;
+    const helpPct = total ? Math.round(helps / total * 100) : null;
+    const barHtml = total
+      ? `<div class="mini-bar"><div class="fill ${net >= 0 ? 'fill-help' : 'fill-hurt'}" style="${net >= 0 ? `left:0;width:${helpPct}%` : `right:0;width:${100 - helpPct}%`}"></div></div>`
+      : '<span class="pct">no analysed votes</span>';
+    const netLabel = total ? (net >= 0 ? `<span class="tag-help">+${net}</span>` : `<span class="tag-hurt">−${Math.abs(net)}</span>`) : '—';
+    return `<tr>
+      <td><a class="mp-name" href="https://members.parliament.uk/member/${m.member_id}/voting" target="_blank" rel="noopener">${m.name}</a><br><span class="pct">${m.constituency || ''}</span></td>
+      <td><span class="party-badge ${partyCls(m.party)}">${partyShort(m.party)}</span></td>
+      <td class="num frac"><span class="den">${s.total_divisions || 0}</span></td>
+      <td class="num frac">${s.voted_count || 0} <span class="den">/ ${s.total_divisions || 0}</span></td>
+      <td class="num">${s.participation_pct ?? 0}%</td>
+      <td class="num tag-help">${helps}</td>
+      <td class="num tag-hurt">${hurts}</td>
+      <td>${total ? `<span class="tag-help">${helps}</span> : <span class="tag-hurt">${hurts}</span> <span class="pct">(${helpPct}% help)</span>` : '—'}</td>
+      <td class="bar-cell">${netLabel} ${barHtml}</td>
+      <td class="frac">${fmtDate(s.last_vote_date)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function sKey() { return sortKey; }
+
+document.querySelectorAll('th[data-k]').forEach(th => {
+  th.addEventListener('click', () => {
+    const k = th.dataset.k;
+    sortDir = (sortKey === k) ? -sortDir : -1;
+    sortKey = k;
+    const orig = sortKey, dir = sortDir;
+    data.sort((a, b) => {
+      const av = orig === 'name' || orig === 'party' ? a[orig] : a.stats[orig] ?? '';
+      const bv = orig === 'name' || orig === 'party' ? b[orig] : b.stats[orig] ?? '';
+      if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * (sortDir = dir);
+      return String(av).localeCompare(String(bv)) * dir;
+    });
+    render();
+  });
+});
+
+(async () => {
+  try {
+    const r = await fetch('/api/mps/stats');
+    data = await r.json();
+    const tbl = document.getElementById('tbl');
+    document.getElementById('loading').style.display = 'none';
+    tbl.style.display = '';
+    render();
+  } catch (e) {
+    document.getElementById('loading').textContent = '⚠️ Could not load MP stats';
+  }
+})();
+</script>
+</body>
+</html>""")
 
 # ---------------------------------------------------------------------------
 # Entry point

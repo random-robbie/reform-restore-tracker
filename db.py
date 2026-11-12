@@ -2,7 +2,7 @@ import sqlite3
 import os
 from contextlib import contextmanager
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "reform.db")
+DB_PATH = os.environ.get("REFORM_DB") or os.path.join(os.path.dirname(__file__), "reform.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS mps (
